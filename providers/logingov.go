@@ -149,6 +149,15 @@ type loginGovCustomClaims struct {
 	jwt.RegisteredClaims
 }
 
+// parse the user attributes from UserInfo
+type userInfo struct {
+	Sub                 string `json:"sub"`
+	Email               string `json:"email"`
+	EmailVerified       bool   `json:"email_verified"`
+	PhoneNumber         string `json:"phone_number"`
+	PhoneNumberVerfieed bool   `json:"phone_number_verified"`
+}
+
 // checkNonce checks the nonce in the id_token
 func checkNonce(idToken string, p *LoginGovProvider) (err error) {
 	token, err := jwt.ParseWithClaims(idToken, &loginGovCustomClaims{}, func(_ *jwt.Token) (interface{}, error) {
@@ -171,38 +180,32 @@ func checkNonce(idToken string, p *LoginGovProvider) (err error) {
 	return
 }
 
-func emailFromUserInfo(ctx context.Context, accessToken string, userInfoEndpoint string) (string, error) {
-	// parse the user attributes from the data we got and make sure that
-	// the email address has been validated.
-	var emailData struct {
-		Email         string `json:"email"`
-		EmailVerified bool   `json:"email_verified"`
-	}
-
+func getUserInfo(ctx context.Context, accessToken string, userInfoEndpoint string) (*userInfo, error) {
+	var data userInfo
 	// query the user info endpoint for user attributes
 	err := requests.New(userInfoEndpoint).
 		WithContext(ctx).
 		SetHeader("Authorization", tokenTypeBearer+" "+accessToken).
 		Do().
-		UnmarshalInto(&emailData)
+		UnmarshalInto(&data)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	email := emailData.Email
+	email := data.Email
 	if email == "" {
-		return "", fmt.Errorf("missing email")
+		return nil, fmt.Errorf("missing email")
 	}
 
-	if !emailData.EmailVerified {
-		return "", fmt.Errorf("email %s not listed as verified", email)
+	if !data.EmailVerified {
+		return nil, fmt.Errorf("email %s not listed as verified", email)
 	}
 
-	return email, nil
+	return &data, nil
 }
 
 // Redeem exchanges the OAuth2 authentication token for an ID token
-func (p *LoginGovProvider) Redeem(ctx context.Context, _, code, codeVerifier string) (*sessions.SessionState, error) {
+func (p *LoginGovProvider) Redeem(ctx context.Context, redirectURL, code, codeVerifier string) (*sessions.SessionState, error) {
 	if code == "" {
 		return nil, ErrMissingCode
 	}
@@ -223,6 +226,7 @@ func (p *LoginGovProvider) Redeem(ctx context.Context, _, code, codeVerifier str
 	params.Add("client_assertion", ss)
 	params.Add("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
 	params.Add("code", code)
+	params.Add("redirect_uri", redirectURL)
 	params.Add("grant_type", "authorization_code")
 	if codeVerifier != "" {
 		params.Add("code_verifier", codeVerifier)
@@ -253,8 +257,7 @@ func (p *LoginGovProvider) Redeem(ctx context.Context, _, code, codeVerifier str
 	}
 
 	// Get the email address
-	var email string
-	email, err = emailFromUserInfo(ctx, jsonResponse.AccessToken, p.ProfileURL.String())
+	userInfo, err := getUserInfo(ctx, jsonResponse.AccessToken, p.ProfileURL.String())
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +265,8 @@ func (p *LoginGovProvider) Redeem(ctx context.Context, _, code, codeVerifier str
 	session := &sessions.SessionState{
 		AccessToken: jsonResponse.AccessToken,
 		IDToken:     jsonResponse.IDToken,
-		Email:       email,
+		Email:       userInfo.Email,
+		User:        userInfo.Sub,
 	}
 
 	session.CreatedAtNow()
